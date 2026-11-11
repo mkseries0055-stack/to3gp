@@ -33,5 +33,5 @@ android {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.activity:activity-ktx:1.8.2")
-    implementation("dev.ffmpegkit-maintained:ffmpeg:7.1.6")
+    implementation("dev.ffmpegkit-maintained:ffmpeg:8.1.7")
 }

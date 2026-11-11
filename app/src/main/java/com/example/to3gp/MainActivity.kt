@@ -12,6 +12,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -31,12 +32,20 @@ class MainActivity : AppCompatActivity() {
     private val green = Color.parseColor("#15803D")
     private val red = Color.parseColor("#B91C1C")
 
-    private var videoUri: Uri? = null
+    private var videoUris: List<Uri> = emptyList()
+
+    @Volatile private var cancelled = false
+    @Volatile private var curTotal = 0L
+    @Volatile private var lastError = ""
+
+    private lateinit var pickBtn: Button
     private lateinit var fileLabel: TextView
     private lateinit var status: TextView
     private lateinit var convertBtn: Button
+    private lateinit var cancelBtn: Button
     private lateinit var sizeGroup: RadioGroup
     private lateinit var progressBox: LinearLayout
+    private lateinit var queueText: TextView
     private lateinit var percentText: TextView
     private lateinit var bar: ProgressBar
     private lateinit var timeText: TextView
@@ -60,8 +69,14 @@ class MainActivity : AppCompatActivity() {
             contentResolver.query(uri, null, null, null, null)?.use { c ->
                 val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (c.moveToFirst() && i >= 0) c.getString(i) else null
-            } ?: "ভিডিও"
-        } catch (_: Throwable) { "ভিডিও" }
+            } ?: "video"
+        } catch (_: Throwable) { "video" }
+    }
+
+    private fun baseName(name: String): String {
+        val n = name.substringBeforeLast('.', name)
+        val clean = n.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(80)
+        return if (clean.isEmpty()) "video" else clean
     }
 
     private fun fmt(ms: Long): String {
@@ -69,9 +84,16 @@ class MainActivity : AppCompatActivity() {
         return String.format(Locale.US, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
     }
 
-    private fun setConvertEnabled(on: Boolean) {
-        convertBtn.isEnabled = on
-        convertBtn.alpha = if (on) 1f else 0.45f
+    private fun setButtons(busy: Boolean) {
+        val canConvert = !busy && videoUris.isNotEmpty()
+        convertBtn.isEnabled = canConvert
+        convertBtn.alpha = if (canConvert) 1f else 0.45f
+        pickBtn.isEnabled = !busy
+        pickBtn.alpha = if (busy) 0.45f else 1f
+        cancelBtn.visibility = if (busy) View.VISIBLE else View.GONE
+        cancelBtn.isEnabled = true
+        if (busy) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     private fun showStatus(text: String, color: Int, size: Float = 14f) {
@@ -87,15 +109,21 @@ class MainActivity : AppCompatActivity() {
         timeText.text = fmt(doneMs) + " / " + fmt(totalMs)
     }
 
-    private val picker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        videoUri = uri
-        if (uri != null) {
-            fileLabel.text = "🎬  " + fileName(uri)
+    private val picker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            videoUris = uris
+            fileLabel.text = if (uris.size == 1) {
+                "🎬  " + fileName(uris[0])
+            } else {
+                val names = uris.take(5).joinToString("\n") { "• " + fileName(it) }
+                val more = if (uris.size > 5) "\n…আরও ${uris.size - 5} টি" else ""
+                "🎬  ${uris.size} টি ভিডিও বাছা হয়েছে\n$names$more"
+            }
             fileLabel.setTextColor(textDark)
             progressBox.visibility = View.GONE
             showStatus("প্রস্তুত! এবার কনভার্ট করুন", textGray)
         }
-        setConvertEnabled(uri != null)
+        setButtons(false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -144,10 +172,10 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { setMargins(dp(16), -dp(32), dp(16), dp(16)) }
 
-        val pickBtn = Button(this).apply {
-            text = "📂  ভিডিও বেছে নিন"
+        pickBtn = Button(this).apply {
+            text = "📂  ভিডিও বেছে নিন (একাধিক হতে পারে)"
             isAllCaps = false
-            textSize = 16f
+            textSize = 15f
             setTextColor(primary)
             background = shape(Color.WHITE, 14, primary)
             stateListAnimator = null
@@ -196,22 +224,41 @@ class MainActivity : AppCompatActivity() {
             ).apply { cornerRadius = dp(14).toFloat() }
             stateListAnimator = null
         }
-        setConvertEnabled(false)
         card.addView(convertBtn, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(16) })
 
-        // প্রগ্রেস অংশ
+        cancelBtn = Button(this).apply {
+            text = "⛔  বাতিল করুন"
+            isAllCaps = false
+            textSize = 16f
+            setTextColor(red)
+            background = shape(Color.WHITE, 14, red)
+            stateListAnimator = null
+            visibility = View.GONE
+        }
+        card.addView(cancelBtn, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(10) })
+
         progressBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             visibility = View.GONE
             setPadding(0, dp(20), 0, 0)
         }
+        queueText = TextView(this).apply {
+            text = ""
+            textSize = 14f
+            setTextColor(textDark)
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        progressBox.addView(queueText)
         percentText = TextView(this).apply {
             text = "0.0%"
             textSize = 32f
             setTextColor(primary)
             typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(8), 0, 0)
         }
         progressBox.addView(percentText)
         progressBox.addView(TextView(this).apply {
@@ -237,7 +284,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(progressBox)
 
         status = TextView(this).apply {
-            text = "শুরু করতে একটি ভিডিও বেছে নিন"
+            text = "শুরু করতে এক বা একাধিক ভিডিও বেছে নিন"
             textSize = 14f
             setTextColor(textGray)
             gravity = Gravity.CENTER
@@ -261,108 +308,151 @@ class MainActivity : AppCompatActivity() {
             addView(page)
         })
 
+        setButtons(false)
+
         if (crashFile.exists()) {
             showStatus("আগের ক্র্যাশের ত্রুটি:\n" + crashFile.readText().take(1200), red, 11f)
             crashFile.delete()
         }
 
+        FFmpegKitConfig.enableStatisticsCallback { st ->
+            val t = st.time.toLong()
+            runOnUiThread { updateProgress(t, curTotal) }
+        }
+
         pickBtn.setOnClickListener { picker.launch("video/*") }
-        convertBtn.setOnClickListener { convert() }
+        convertBtn.setOnClickListener { runQueue() }
+        cancelBtn.setOnClickListener {
+            cancelled = true
+            cancelBtn.isEnabled = false
+            showStatus("বাতিল করা হচ্ছে...", red)
+            try { FFmpegKit.cancel() } catch (_: Throwable) {}
+        }
     }
 
-    private fun convert() {
-        val uri = videoUri ?: return
+    private fun runQueue() {
+        val uris = videoUris
+        if (uris.isEmpty()) return
         val big = sizeGroup.checkedRadioButtonId == 2
         val w = if (big) 352 else 176
         val h = if (big) 288 else 144
         val vb = if (big) "300k" else "128k"
 
-        setConvertEnabled(false)
-        progressBox.visibility = View.GONE
-        showStatus("ভিডিও কপি হচ্ছে... ⏳", textGray)
+        cancelled = false
+        setButtons(true)
+        progressBox.visibility = View.VISIBLE
+        showStatus("", textGray)
 
         Thread {
-            val stamp = System.currentTimeMillis()
-            val tmpIn = File(cacheDir, "in_$stamp.mp4")
-            val out = File(cacheDir, "out_$stamp.3gp")
-            try {
-                contentResolver.openInputStream(uri)!!.use { i ->
-                    tmpIn.outputStream().use { o -> i.copyTo(o) }
-                }
-
-                val total: Long = try {
-                    val r = MediaMetadataRetriever()
-                    r.setDataSource(tmpIn.absolutePath)
-                    val d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    r.release()
-                    d
-                } catch (_: Throwable) { 0L }
-
+            var ok = 0
+            var fail = 0
+            for ((idx, uri) in uris.withIndex()) {
+                if (cancelled) break
+                val name = fileName(uri)
                 runOnUiThread {
-                    showStatus("কনভার্ট হচ্ছে... অপেক্ষা করুন", textGray)
-                    updateProgress(0, total)
-                    progressBox.visibility = View.VISIBLE
+                    queueText.text = "ভিডিও ${idx + 1}/${uris.size}: $name"
+                    updateProgress(0, 0)
+                    showStatus("ভিডিও কপি হচ্ছে... ⏳", textGray)
                 }
-
-                FFmpegKitConfig.enableStatisticsCallback { st ->
-                    val t = st.time.toLong()
-                    runOnUiThread { updateProgress(t, total) }
+                when (convertOne(uri, name, w, h, vb)) {
+                    0 -> ok++
+                    1 -> fail++
+                    else -> {}
                 }
-
-                fun cmd(audio: String) =
-                    "-y -i \"${tmpIn.absolutePath}\" " +
-                    "-vf scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2 " +
-                    "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
-
-                val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
-                val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
-
-                var s = FFmpegKit.execute(cmd(amr))
-                if (!ReturnCode.isSuccess(s.returnCode)) s = FFmpegKit.execute(cmd(aac))
-
-                if (ReturnCode.isSuccess(s.returnCode)) {
-                    runOnUiThread { updateProgress(total, total) }
-                    saveResult(out)
+            }
+            runOnUiThread {
+                setButtons(false)
+                progressBox.visibility = View.GONE
+                if (cancelled) {
+                    showStatus("⛔ বাতিল করা হয়েছে\n$ok টি আগেই সম্পন্ন হয়েছিল", red, 15f)
+                } else if (fail == 0) {
+                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nDownload/3GP ফোল্ডারে সেভ হয়েছে", green, 16f)
                 } else {
-                    val log = (s.output ?: "").takeLast(900)
-                    runOnUiThread {
-                        progressBox.visibility = View.GONE
-                        showStatus("কনভার্ট ব্যর্থ ❌\n$log", red, 11f)
-                        setConvertEnabled(true)
-                    }
+                    showStatus("সম্পন্ন: $ok টি, ব্যর্থ: $fail টি ❌\n" + lastError.takeLast(500), red, 12f)
                 }
-            } catch (t: Throwable) {
-                runOnUiThread {
-                    progressBox.visibility = View.GONE
-                    showStatus("ত্রুটি:\n" + rootCause(t).take(700), red, 12f)
-                    setConvertEnabled(true)
-                }
-            } finally {
-                tmpIn.delete()
             }
         }.start()
     }
 
-    private fun saveResult(file: File) {
+    // 0 = সফল, 1 = ব্যর্থ, 2 = বাতিল
+    private fun convertOne(uri: Uri, name: String, w: Int, h: Int, vb: String): Int {
+        val stamp = System.currentTimeMillis()
+        val tmpIn = File(cacheDir, "in_$stamp.mp4")
+        val out = File(cacheDir, "out_$stamp.3gp")
         try {
+            contentResolver.openInputStream(uri)!!.use { input ->
+                tmpIn.outputStream().use { output ->
+                    val buf = ByteArray(256 * 1024)
+                    while (true) {
+                        if (cancelled) return 2
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                    }
+                }
+            }
+            if (cancelled) return 2
+
+            curTotal = try {
+                val r = MediaMetadataRetriever()
+                r.setDataSource(tmpIn.absolutePath)
+                val d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                r.release()
+                d
+            } catch (_: Throwable) { 0L }
+
+            runOnUiThread {
+                showStatus("কনভার্ট হচ্ছে... অপেক্ষা করুন", textGray)
+                updateProgress(0, curTotal)
+            }
+
+            fun cmd(audio: String) =
+                "-y -i \"${tmpIn.absolutePath}\" " +
+                "-vf scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2 " +
+                "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
+
+            val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
+            val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
+
+            var s = FFmpegKit.execute(cmd(amr))
+            if (cancelled) return 2
+            if (!ReturnCode.isSuccess(s.returnCode)) {
+                s = FFmpegKit.execute(cmd(aac))
+                if (cancelled) return 2
+            }
+
+            if (!ReturnCode.isSuccess(s.returnCode)) {
+                lastError = "[$name]\n" + (s.output ?: "")
+                return 1
+            }
+
+            runOnUiThread { updateProgress(curTotal, curTotal) }
+            return if (saveResult(out, baseName(name))) 0 else 1
+        } catch (t: Throwable) {
+            lastError = "[$name]\n" + rootCause(t)
+            return 1
+        } finally {
+            tmpIn.delete()
+            out.delete()
+        }
+    }
+
+    private fun saveResult(file: File, base: String): Boolean {
+        return try {
             val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, "video_${System.currentTimeMillis()}.3gp")
+                put(MediaStore.Downloads.DISPLAY_NAME, "$base.3gp")
                 put(MediaStore.Downloads.MIME_TYPE, "video/3gpp")
                 put(MediaStore.Downloads.RELATIVE_PATH, "Download/3GP")
             }
             val dest = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            dest?.let { u -> contentResolver.openOutputStream(u)?.use { o -> file.inputStream().use { it.copyTo(o) } } }
-            file.delete()
-            runOnUiThread {
-                showStatus("✅ সম্পন্ন!\nDownload/3GP ফোল্ডারে সেভ হয়েছে", green, 16f)
-                setConvertEnabled(true)
+                ?: throw RuntimeException("ফাইল তৈরি করা যায়নি")
+            contentResolver.openOutputStream(dest)!!.use { o ->
+                file.inputStream().use { it.copyTo(o) }
             }
+            true
         } catch (t: Throwable) {
-            runOnUiThread {
-                progressBox.visibility = View.GONE
-                showStatus("সেভ করতে ত্রুটি:\n" + rootCause(t).take(700), red, 12f)
-                setConvertEnabled(true)
-            }
+            lastError = "সেভ করতে ত্রুটি: " + rootCause(t)
+            false
         }
     }
 }

@@ -256,7 +256,7 @@ class MainActivity : AppCompatActivity() {
             rows = built
             listTitle.text = "📋 ভিডিও তালিকা (${built.size} টি)"
             listCard.visibility = View.VISIBLE
-            showStatus("প্রস্তুত! এবার কনভার্ট করুন\n(কোনোটা বাদ দিতে ডানের ❌ চাপুন)", textGray)
+            showStatus("প্রস্তুত! এবার Convert চাপুন\n(কোনোটা বাদ দিতে ডানের ❌ চাপুন)", textGray)
         }
         setButtons(false)
     }
@@ -352,9 +352,9 @@ class MainActivity : AppCompatActivity() {
 
         val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         convertBtn = Button(this).apply {
-            text = "🚀  কনভার্ট করুন"
+            text = "Convert"
             isAllCaps = false
-            textSize = 16f
+            textSize = 17f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             background = GradientDrawable(
@@ -406,7 +406,7 @@ class MainActivity : AppCompatActivity() {
         ).apply { setMargins(dp(16), 0, dp(16), dp(12)) })
 
         footer = TextView(this).apply {
-            text = "কনভার্ট চাপলে সেভের ফোল্ডার বেছে নিতে বলা হবে"
+            text = "Convert চাপলে সেভের ফোল্ডার বেছে নিতে বলা হবে"
             textSize = 12f
             setTextColor(textGray)
             gravity = Gravity.CENTER

@@ -9,7 +9,6 @@ import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
 
@@ -73,44 +72,57 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun convert() {
-        try {
-            val uri = videoUri ?: return
-            val (w, h, vb) = if (sizeGroup.checkedRadioButtonId == 2) Triple(352, 288, "300k") else Triple(176, 144, "128k")
+        val uri = videoUri ?: return
+        val big = sizeGroup.checkedRadioButtonId == 2
+        val w = if (big) 352 else 176
+        val h = if (big) 288 else 144
+        val vb = if (big) "300k" else "128k"
 
-            val input = FFmpegKitConfig.getSafParameterForRead(this, uri)
-            val out = File(cacheDir, "out_${System.currentTimeMillis()}.3gp")
+        convertBtn.isEnabled = false
+        status.textSize = 14f
+        status.text = "ভিডিও কপি হচ্ছে... ⏳"
 
-            fun cmd(audio: String) =
-                "-y -i $input " +
-                "-vf scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2 " +
-                "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
+        Thread {
+            val stamp = System.currentTimeMillis()
+            val tmpIn = File(cacheDir, "in_$stamp.mp4")
+            val out = File(cacheDir, "out_$stamp.3gp")
+            try {
+                contentResolver.openInputStream(uri)!!.use { i ->
+                    tmpIn.outputStream().use { o -> i.copyTo(o) }
+                }
+                runOnUiThread { status.text = "কনভার্ট হচ্ছে... অপেক্ষা করুন ⏳" }
 
-            val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
-            val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
+                fun cmd(audio: String) =
+                    "-y -i \"${tmpIn.absolutePath}\" " +
+                    "-vf scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2 " +
+                    "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
 
-            convertBtn.isEnabled = false
-            status.textSize = 14f
-            status.text = "কনভার্ট হচ্ছে... অপেক্ষা করুন ⏳"
+                val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
+                val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
 
-            FFmpegKit.executeAsync(cmd(amr)) { s1 ->
-                if (ReturnCode.isSuccess(s1.returnCode)) {
+                var s = FFmpegKit.execute(cmd(amr))
+                if (!ReturnCode.isSuccess(s.returnCode)) s = FFmpegKit.execute(cmd(aac))
+
+                if (ReturnCode.isSuccess(s.returnCode)) {
                     saveResult(out)
                 } else {
-                    FFmpegKit.executeAsync(cmd(aac)) { s2 ->
-                        if (ReturnCode.isSuccess(s2.returnCode)) saveResult(out)
-                        else runOnUiThread {
-                            status.textSize = 11f
-                            status.text = "কনভার্ট ব্যর্থ ❌\n" + (s2.failStackTrace ?: s2.output ?: "").takeLast(1200)
-                            convertBtn.isEnabled = true
-                        }
+                    val log = (s.output ?: "").takeLast(900)
+                    runOnUiThread {
+                        status.textSize = 11f
+                        status.text = "কনভার্ট ব্যর্থ ❌\n$log"
+                        convertBtn.isEnabled = true
                     }
                 }
+            } catch (t: Throwable) {
+                runOnUiThread {
+                    status.textSize = 12f
+                    status.text = "ত্রুটি:\n" + rootCause(t).take(700)
+                    convertBtn.isEnabled = true
+                }
+            } finally {
+                tmpIn.delete()
             }
-        } catch (t: Throwable) {
-            status.textSize = 12f
-            status.text = "মূল কারণ:\n" + rootCause(t).take(700) + "\n\n" + t.toString().take(300)
-            convertBtn.isEnabled = true
-        }
+        }.start()
     }
 
     private fun saveResult(file: File) {
@@ -124,6 +136,7 @@ class MainActivity : AppCompatActivity() {
             dest?.let { u -> contentResolver.openOutputStream(u)?.use { o -> file.inputStream().use { it.copyTo(o) } } }
             file.delete()
             runOnUiThread {
+                status.textSize = 14f
                 status.text = "সম্পন্ন ✅ Download/3GP ফোল্ডারে সেভ হয়েছে"
                 convertBtn.isEnabled = true
             }

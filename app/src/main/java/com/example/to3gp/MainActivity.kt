@@ -414,9 +414,7 @@ class MainActivity : AppCompatActivity() {
             showStatus("বাতিল করা হচ্ছে...", red)
             try { FFmpegKit.cancel() } catch (_: Throwable) {}
         }
-    }
-
-    private fun runQueue() {
+    }    private fun runQueue() {
         val list = rows
         if (list.isEmpty()) return
         val big = sizeGroup.checkedRadioButtonId == 2
@@ -520,4 +518,47 @@ class MainActivity : AppCompatActivity() {
                 "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
 
             val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
-            
+            val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
+
+            var s = FFmpegKit.execute(cmd(amr))
+            if (stopped(row)) return 2
+            if (!ReturnCode.isSuccess(s.returnCode)) {
+                s = FFmpegKit.execute(cmd(aac))
+                if (stopped(row)) return 2
+            }
+
+            if (!ReturnCode.isSuccess(s.returnCode)) {
+                lastError = "[${row.name}]\n" + (s.output ?: "")
+                return 1
+            }
+
+            return if (saveResult(out, baseName(row.name))) 0 else 1
+        } catch (t: Throwable) {
+            if (stopped(row)) return 2
+            lastError = "[${row.name}]\n" + rootCause(t)
+            return 1
+        } finally {
+            tmpIn.delete()
+            out.delete()
+        }
+    }
+
+    private fun saveResult(file: File, base: String): Boolean {
+        return try {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, "$base.3gp")
+                put(MediaStore.Downloads.MIME_TYPE, "video/3gpp")
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download/3GP")
+            }
+            val dest = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw RuntimeException("ফাইল তৈরি করা যায়নি")
+            contentResolver.openOutputStream(dest)!!.use { o ->
+                file.inputStream().use { it.copyTo(o) }
+            }
+            true
+        } catch (t: Throwable) {
+            lastError = "সেভ করতে ত্রুটি: " + rootCause(t)
+            false
+        }
+    }
+}

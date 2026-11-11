@@ -26,12 +26,18 @@ class MainActivity : AppCompatActivity() {
         convertBtn.isEnabled = uri != null
     }
 
+    private fun rootCause(t: Throwable): String {
+        var r: Throwable = t
+        while (r.cause != null && r.cause !== r) r = r.cause!!
+        return r.toString()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val crashFile = File(filesDir, "crash.txt")
         Thread.setDefaultUncaughtExceptionHandler { _, e ->
-            try { crashFile.writeText(e.stackTraceToString()) } catch (_: Throwable) {}
+            try { crashFile.writeText(rootCause(e) + "\n\n" + e.stackTraceToString()) } catch (_: Throwable) {}
             android.os.Process.killProcess(android.os.Process.myPid())
         }
 
@@ -58,7 +64,7 @@ class MainActivity : AppCompatActivity() {
 
         if (crashFile.exists()) {
             status.textSize = 11f
-            status.text = "আগের ক্র্যাশের ত্রুটি:\n" + crashFile.readText().take(1500)
+            status.text = "আগের ক্র্যাশের ত্রুটি:\n" + crashFile.readText().take(1200)
             crashFile.delete()
         }
 
@@ -101,8 +107,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         } catch (t: Throwable) {
-            status.textSize = 11f
-            status.text = "ত্রুটি:\n" + t.stackTraceToString().take(1500)
+            status.textSize = 12f
+            status.text = "মূল কারণ:\n" + rootCause(t).take(700) + "\n\n" + t.toString().take(300)
             convertBtn.isEnabled = true
         }
     }
@@ -123,8 +129,8 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (t: Throwable) {
             runOnUiThread {
-                status.textSize = 11f
-                status.text = "সেভ করতে ত্রুটি:\n" + t.stackTraceToString().take(1500)
+                status.textSize = 12f
+                status.text = "সেভ করতে ত্রুটি:\n" + rootCause(t).take(700)
                 convertBtn.isEnabled = true
             }
         }

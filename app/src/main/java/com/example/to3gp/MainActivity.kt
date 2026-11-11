@@ -29,6 +29,12 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val crashFile = File(filesDir, "crash.txt")
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            try { crashFile.writeText(e.stackTraceToString()) } catch (_: Throwable) {}
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+
         val pad = (24 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -48,57 +54,79 @@ class MainActivity : AppCompatActivity() {
         status = TextView(this).apply { text = "শুরু করতে ভিডিও বেছে নিন"; setPadding(0, pad, 0, 0) }
 
         listOf(title, pickBtn, sizeGroup, convertBtn, status).forEach { root.addView(it) }
-        setContentView(root)
+        setContentView(ScrollView(this).apply { addView(root) })
+
+        if (crashFile.exists()) {
+            status.textSize = 11f
+            status.text = "আগের ক্র্যাশের ত্রুটি:\n" + crashFile.readText().take(1500)
+            crashFile.delete()
+        }
 
         pickBtn.setOnClickListener { picker.launch("video/*") }
         convertBtn.setOnClickListener { convert() }
     }
 
     private fun convert() {
-        val uri = videoUri ?: return
-        val (w, h, vb) = if (sizeGroup.checkedRadioButtonId == 2) Triple(352, 288, "300k") else Triple(176, 144, "128k")
+        try {
+            val uri = videoUri ?: return
+            val (w, h, vb) = if (sizeGroup.checkedRadioButtonId == 2) Triple(352, 288, "300k") else Triple(176, 144, "128k")
 
-        val input = FFmpegKitConfig.getSafParameterForRead(this, uri)
-        val out = File(cacheDir, "out_${System.currentTimeMillis()}.3gp")
+            val input = FFmpegKitConfig.getSafParameterForRead(this, uri)
+            val out = File(cacheDir, "out_${System.currentTimeMillis()}.3gp")
 
-        fun cmd(audio: String) =
-            "-y -i $input " +
-            "-vf scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2 " +
-            "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
+            fun cmd(audio: String) =
+                "-y -i $input " +
+                "-vf scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2 " +
+                "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
 
-        val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
-        val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
+            val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
+            val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
 
-        convertBtn.isEnabled = false
-        status.text = "কনভার্ট হচ্ছে... অপেক্ষা করুন ⏳"
+            convertBtn.isEnabled = false
+            status.textSize = 14f
+            status.text = "কনভার্ট হচ্ছে... অপেক্ষা করুন ⏳"
 
-        FFmpegKit.executeAsync(cmd(amr)) { s1 ->
-            if (ReturnCode.isSuccess(s1.returnCode)) {
-                saveResult(out)
-            } else {
-                FFmpegKit.executeAsync(cmd(aac)) { s2 ->
-                    if (ReturnCode.isSuccess(s2.returnCode)) saveResult(out)
-                    else runOnUiThread {
-                        status.text = "কনভার্ট ব্যর্থ হয়েছে ❌"
-                        convertBtn.isEnabled = true
+            FFmpegKit.executeAsync(cmd(amr)) { s1 ->
+                if (ReturnCode.isSuccess(s1.returnCode)) {
+                    saveResult(out)
+                } else {
+                    FFmpegKit.executeAsync(cmd(aac)) { s2 ->
+                        if (ReturnCode.isSuccess(s2.returnCode)) saveResult(out)
+                        else runOnUiThread {
+                            status.textSize = 11f
+                            status.text = "কনভার্ট ব্যর্থ ❌\n" + (s2.failStackTrace ?: s2.output ?: "").takeLast(1200)
+                            convertBtn.isEnabled = true
+                        }
                     }
                 }
             }
+        } catch (t: Throwable) {
+            status.textSize = 11f
+            status.text = "ত্রুটি:\n" + t.stackTraceToString().take(1500)
+            convertBtn.isEnabled = true
         }
     }
 
     private fun saveResult(file: File) {
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, "video_${System.currentTimeMillis()}.3gp")
-            put(MediaStore.Downloads.MIME_TYPE, "video/3gpp")
-            put(MediaStore.Downloads.RELATIVE_PATH, "Download/3GP")
-        }
-        val dest = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-        dest?.let { u -> contentResolver.openOutputStream(u)?.use { o -> file.inputStream().use { it.copyTo(o) } } }
-        file.delete()
-        runOnUiThread {
-            status.text = "সম্পন্ন ✅ Download/3GP ফোল্ডারে সেভ হয়েছে"
-            convertBtn.isEnabled = true
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, "video_${System.currentTimeMillis()}.3gp")
+                put(MediaStore.Downloads.MIME_TYPE, "video/3gpp")
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download/3GP")
+            }
+            val dest = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            dest?.let { u -> contentResolver.openOutputStream(u)?.use { o -> file.inputStream().use { it.copyTo(o) } } }
+            file.delete()
+            runOnUiThread {
+                status.text = "সম্পন্ন ✅ Download/3GP ফোল্ডারে সেভ হয়েছে"
+                convertBtn.isEnabled = true
+            }
+        } catch (t: Throwable) {
+            runOnUiThread {
+                status.textSize = 11f
+                status.text = "সেভ করতে ত্রুটি:\n" + t.stackTraceToString().take(1500)
+                convertBtn.isEnabled = true
+            }
         }
     }
 }

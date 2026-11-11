@@ -7,6 +7,8 @@
         android:maxSdkVersion="32" />
 
     <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="3GP Converter"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
         <activity

@@ -37,7 +37,15 @@ class MainActivity : AppCompatActivity() {
     private val orange = Color.parseColor("#F59E0B")
     private val track = Color.parseColor("#D1D5DB")
 
-    private class Row(val uri: Uri, val name: String, val bar: ProgressBar, val label: TextView)
+    private class Row(
+        val uri: Uri,
+        val name: String,
+        val bar: ProgressBar,
+        val label: TextView,
+        val x: TextView
+    ) {
+        @Volatile var skipped = false
+    }
 
     private var rows: List<Row> = emptyList()
 
@@ -84,6 +92,8 @@ class MainActivity : AppCompatActivity() {
         return if (clean.isEmpty()) "video" else clean
     }
 
+    private fun stopped(r: Row) = cancelled || r.skipped
+
     private fun setButtons(busy: Boolean) {
         val canConvert = !busy && rows.isNotEmpty()
         convertBtn.isEnabled = canConvert
@@ -113,6 +123,20 @@ class MainActivity : AppCompatActivity() {
         r.bar.progress = 0
         r.label.text = text
         r.label.setTextColor(textGray)
+    }
+
+    private fun setSkippedLook(r: Row) {
+        setWaiting(r, "বাদ ❌")
+        r.x.visibility = View.GONE
+    }
+
+    private fun skipRow(r: Row) {
+        if (r.skipped) return
+        r.skipped = true
+        setSkippedLook(r)
+        if (curRow === r) {
+            try { FFmpegKit.cancel() } catch (_: Throwable) {}
+        }
     }
 
     private fun loadThumb(uri: Uri, iv: ImageView) {
@@ -181,15 +205,26 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTextColor(textGray)
             gravity = Gravity.END
-            minWidth = dp(70)
-            setPadding(dp(8), 0, 0, 0)
+            minWidth = dp(64)
+            setPadding(dp(8), 0, dp(2), 0)
         }
         barRow.addView(label)
+        val x = TextView(this).apply {
+            text = "❌"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(6), dp(4), dp(6))
+            isClickable = true
+        }
+        barRow.addView(x)
         right.addView(barRow, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
 
         line.addView(right, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        return Pair(line, Row(uri, name, bar, label))
+
+        val row = Row(uri, name, bar, label, x)
+        x.setOnClickListener { skipRow(row) }
+        return Pair(line, row)
     }
 
     private val picker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
@@ -204,7 +239,7 @@ class MainActivity : AppCompatActivity() {
             rows = built
             listTitle.text = "📋 ভিডিও তালিকা (${built.size} টি)"
             listCard.visibility = View.VISIBLE
-            showStatus("প্রস্তুত! এবার কনভার্ট করুন", textGray)
+            showStatus("প্রস্তুত! এবার কনভার্ট করুন\n(কোনোটা বাদ দিতে ডানের ❌ চাপুন)", textGray)
         }
         setButtons(false)
     }
@@ -245,7 +280,6 @@ class MainActivity : AppCompatActivity() {
         })
         page.addView(header)
 
-        // ছোট মূল বক্স
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(14))
@@ -318,7 +352,6 @@ class MainActivity : AppCompatActivity() {
         }
         card.addView(status)
 
-        // ভিডিও তালিকা
         listCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(8))
@@ -366,7 +399,7 @@ class MainActivity : AppCompatActivity() {
             if (r != null && total > 0) {
                 val frac = (st.time.toDouble() / total).coerceIn(0.0, 1.0)
                 runOnUiThread {
-                    if (curRow === r) {
+                    if (curRow === r && !r.skipped) {
                         setRow(r, (frac * 1000).toInt(), red, String.format(Locale.US, "%.1f%%", frac * 100))
                     }
                 }
@@ -393,7 +426,12 @@ class MainActivity : AppCompatActivity() {
 
         cancelled = false
         setButtons(true)
-        list.forEach { setWaiting(it) }
+        list.forEach {
+            if (!it.skipped) {
+                setWaiting(it)
+                it.x.visibility = View.VISIBLE
+            }
+        }
         showStatus("", textGray)
 
         Thread {
@@ -401,48 +439,70 @@ class MainActivity : AppCompatActivity() {
             var fail = 0
             for ((idx, row) in list.withIndex()) {
                 if (cancelled) break
+                if (row.skipped) continue
                 runOnUiThread { showStatus("ভিডিও ${idx + 1}/${list.size} চলছে...", textDark) }
                 curRow = row
                 val res = convertOne(row, w, h, vb)
                 curRow = null
                 when (res) {
-                    0 -> { ok++; runOnUiThread { setRow(row, 1000, green, "সম্পন্ন ✓") } }
-                    1 -> { fail++; runOnUiThread { setRow(row, 1000, orange, "ব্যর্থ ✗") } }
-                    else -> runOnUiThread { setWaiting(row, "বাতিল") }
+                    0 -> {
+                        ok++
+                        runOnUiThread {
+                            setRow(row, 1000, green, "সম্পন্ন ✓")
+                            row.x.visibility = View.GONE
+                        }
+                    }
+                    1 -> {
+                        fail++
+                        runOnUiThread {
+                            setRow(row, 1000, orange, "ব্যর্থ ✗")
+                            row.x.visibility = View.GONE
+                        }
+                    }
+                    else -> runOnUiThread {
+                        if (row.skipped) setSkippedLook(row)
+                        else {
+                            setWaiting(row, "বাতিল")
+                            row.x.visibility = View.GONE
+                        }
+                    }
                 }
             }
             runOnUiThread {
                 setButtons(false)
+                list.forEach { if (!it.skipped && it.x.visibility == View.VISIBLE) it.x.visibility = View.GONE }
+                val skippedCount = list.count { it.skipped }
+                val skipNote = if (skippedCount > 0) "\n($skippedCount টি বাদ দেওয়া হয়েছে)" else ""
                 if (cancelled) {
                     showStatus("⛔ বাতিল করা হয়েছে ($ok টি সম্পন্ন হয়েছিল)", red, 14f)
                 } else if (fail == 0) {
-                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nDownload/3GP ফোল্ডারে সেভ হয়েছে", green, 15f)
+                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nDownload/3GP ফোল্ডারে সেভ হয়েছে$skipNote", green, 15f)
                 } else {
-                    showStatus("সম্পন্ন: $ok টি, ব্যর্থ: $fail টি ❌\n" + lastError.takeLast(500), red, 12f)
+                    showStatus("সম্পন্ন: $ok টি, ব্যর্থ: $fail টি ❌$skipNote\n" + lastError.takeLast(500), red, 12f)
                 }
             }
         }.start()
     }
 
-    // 0 = সফল, 1 = ব্যর্থ, 2 = বাতিল
+    // 0 = সফল, 1 = ব্যর্থ, 2 = বাতিল বা বাদ
     private fun convertOne(row: Row, w: Int, h: Int, vb: String): Int {
         val stamp = System.currentTimeMillis()
         val tmpIn = File(cacheDir, "in_$stamp.mp4")
         val out = File(cacheDir, "out_$stamp.3gp")
         try {
-            runOnUiThread { setRow(row, 0, red, "কপি হচ্ছে…") }
+            runOnUiThread { if (!row.skipped) setRow(row, 0, red, "কপি হচ্ছে…") }
             contentResolver.openInputStream(row.uri)!!.use { input ->
                 tmpIn.outputStream().use { output ->
                     val buf = ByteArray(256 * 1024)
                     while (true) {
-                        if (cancelled) return 2
+                        if (stopped(row)) return 2
                         val n = input.read(buf)
                         if (n < 0) break
                         output.write(buf, 0, n)
                     }
                 }
             }
-            if (cancelled) return 2
+            if (stopped(row)) return 2
 
             curTotal = try {
                 val r = MediaMetadataRetriever()
@@ -452,7 +512,7 @@ class MainActivity : AppCompatActivity() {
                 d
             } catch (_: Throwable) { 0L }
 
-            runOnUiThread { setRow(row, 0, red, "0.0%") }
+            runOnUiThread { if (!row.skipped) setRow(row, 0, red, "0.0%") }
 
             fun cmd(audio: String) =
                 "-y -i \"${tmpIn.absolutePath}\" " +
@@ -460,46 +520,4 @@ class MainActivity : AppCompatActivity() {
                 "-r 15 -c:v h263 -b:v $vb $audio \"${out.absolutePath}\""
 
             val amr = "-c:a libopencore_amrnb -ar 8000 -ac 1 -b:a 12.2k"
-            val aac = "-c:a aac -ar 16000 -ac 1 -b:a 32k"
-
-            var s = FFmpegKit.execute(cmd(amr))
-            if (cancelled) return 2
-            if (!ReturnCode.isSuccess(s.returnCode)) {
-                s = FFmpegKit.execute(cmd(aac))
-                if (cancelled) return 2
-            }
-
-            if (!ReturnCode.isSuccess(s.returnCode)) {
-                lastError = "[${row.name}]\n" + (s.output ?: "")
-                return 1
-            }
-
-            return if (saveResult(out, baseName(row.name))) 0 else 1
-        } catch (t: Throwable) {
-            lastError = "[${row.name}]\n" + rootCause(t)
-            return 1
-        } finally {
-            tmpIn.delete()
-            out.delete()
-        }
-    }
-
-    private fun saveResult(file: File, base: String): Boolean {
-        return try {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, "$base.3gp")
-                put(MediaStore.Downloads.MIME_TYPE, "video/3gpp")
-                put(MediaStore.Downloads.RELATIVE_PATH, "Download/3GP")
-            }
-            val dest = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw RuntimeException("ফাইল তৈরি করা যায়নি")
-            contentResolver.openOutputStream(dest)!!.use { o ->
-                file.inputStream().use { it.copyTo(o) }
-            }
-            true
-        } catch (t: Throwable) {
-            lastError = "সেভ করতে ত্রুটি: " + rootCause(t)
-            false
-        }
-    }
-}
+            

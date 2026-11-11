@@ -2,6 +2,7 @@ package com.example.to3gp
 
 import android.content.ContentValues
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -10,6 +11,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.TextUtils
+import android.util.Size
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -29,26 +32,28 @@ class MainActivity : AppCompatActivity() {
     private val bgColor = Color.parseColor("#F3F5FB")
     private val textDark = Color.parseColor("#1F2937")
     private val textGray = Color.parseColor("#6B7280")
-    private val green = Color.parseColor("#15803D")
-    private val red = Color.parseColor("#B91C1C")
+    private val green = Color.parseColor("#16A34A")
+    private val red = Color.parseColor("#DC2626")
+    private val orange = Color.parseColor("#F59E0B")
+    private val track = Color.parseColor("#D1D5DB")
 
-    private var videoUris: List<Uri> = emptyList()
+    private class Row(val uri: Uri, val name: String, val bar: ProgressBar, val label: TextView)
+
+    private var rows: List<Row> = emptyList()
 
     @Volatile private var cancelled = false
     @Volatile private var curTotal = 0L
+    @Volatile private var curRow: Row? = null
     @Volatile private var lastError = ""
 
     private lateinit var pickBtn: Button
-    private lateinit var fileLabel: TextView
     private lateinit var status: TextView
     private lateinit var convertBtn: Button
     private lateinit var cancelBtn: Button
     private lateinit var sizeGroup: RadioGroup
-    private lateinit var progressBox: LinearLayout
-    private lateinit var queueText: TextView
-    private lateinit var percentText: TextView
-    private lateinit var bar: ProgressBar
-    private lateinit var timeText: TextView
+    private lateinit var listCard: LinearLayout
+    private lateinit var listTitle: TextView
+    private lateinit var listBox: LinearLayout
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -79,13 +84,8 @@ class MainActivity : AppCompatActivity() {
         return if (clean.isEmpty()) "video" else clean
     }
 
-    private fun fmt(ms: Long): String {
-        val s = ms / 1000
-        return String.format(Locale.US, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
-    }
-
     private fun setButtons(busy: Boolean) {
-        val canConvert = !busy && videoUris.isNotEmpty()
+        val canConvert = !busy && rows.isNotEmpty()
         convertBtn.isEnabled = canConvert
         convertBtn.alpha = if (canConvert) 1f else 0.45f
         pickBtn.isEnabled = !busy
@@ -102,25 +102,108 @@ class MainActivity : AppCompatActivity() {
         status.textSize = size
     }
 
-    private fun updateProgress(doneMs: Long, totalMs: Long) {
-        val frac = if (totalMs > 0) (doneMs.toDouble() / totalMs).coerceIn(0.0, 1.0) else 0.0
-        percentText.text = String.format(Locale.US, "%.1f%%", frac * 100)
-        bar.progress = (frac * 1000).toInt()
-        timeText.text = fmt(doneMs) + " / " + fmt(totalMs)
+    private fun setRow(r: Row, progress: Int, color: Int, text: String) {
+        r.bar.progress = progress
+        r.bar.progressTintList = ColorStateList.valueOf(color)
+        r.label.text = text
+        r.label.setTextColor(color)
+    }
+
+    private fun setWaiting(r: Row, text: String = "অপেক্ষায়") {
+        r.bar.progress = 0
+        r.label.text = text
+        r.label.setTextColor(textGray)
+    }
+
+    private fun loadThumb(uri: Uri, iv: ImageView) {
+        Thread {
+            var bmp: Bitmap? = null
+            try { bmp = contentResolver.loadThumbnail(uri, Size(160, 160), null) } catch (_: Throwable) {}
+            if (bmp == null) {
+                try {
+                    val r = MediaMetadataRetriever()
+                    r.setDataSource(this, uri)
+                    bmp = r.getFrameAtTime(1_000_000) ?: r.getFrameAtTime(0)
+                    r.release()
+                } catch (_: Throwable) {}
+            }
+            val b = bmp
+            if (b != null) runOnUiThread { iv.setImageBitmap(b) }
+        }.start()
+    }
+
+    private fun makeRow(uri: Uri, name: String): Pair<View, Row> {
+        val line = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+
+        val thumbBox = FrameLayout(this).apply {
+            background = shape(Color.parseColor("#E5E7EB"), 10)
+            clipToOutline = true
+        }
+        thumbBox.addView(TextView(this).apply {
+            text = "🎬"
+            textSize = 22f
+            gravity = Gravity.CENTER
+        }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        thumbBox.addView(iv, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        line.addView(thumbBox, LinearLayout.LayoutParams(dp(56), dp(56)))
+        loadThumb(uri, iv)
+
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, 0, 0)
+        }
+        right.addView(TextView(this).apply {
+            text = name
+            textSize = 13f
+            setTextColor(textDark)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.MIDDLE
+        })
+
+        val barRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000
+            progress = 0
+            progressTintList = ColorStateList.valueOf(red)
+            progressBackgroundTintList = ColorStateList.valueOf(track)
+        }
+        barRow.addView(bar, LinearLayout.LayoutParams(0, dp(6), 1f))
+        val label = TextView(this).apply {
+            text = "অপেক্ষায়"
+            textSize = 12f
+            setTextColor(textGray)
+            gravity = Gravity.END
+            minWidth = dp(70)
+            setPadding(dp(8), 0, 0, 0)
+        }
+        barRow.addView(label)
+        right.addView(barRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+
+        line.addView(right, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        return Pair(line, Row(uri, name, bar, label))
     }
 
     private val picker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (!uris.isNullOrEmpty()) {
-            videoUris = uris
-            fileLabel.text = if (uris.size == 1) {
-                "🎬  " + fileName(uris[0])
-            } else {
-                val names = uris.take(5).joinToString("\n") { "• " + fileName(it) }
-                val more = if (uris.size > 5) "\n…আরও ${uris.size - 5} টি" else ""
-                "🎬  ${uris.size} টি ভিডিও বাছা হয়েছে\n$names$more"
+            listBox.removeAllViews()
+            val built = ArrayList<Row>()
+            for (u in uris) {
+                val (view, row) = makeRow(u, fileName(u))
+                listBox.addView(view)
+                built.add(row)
             }
-            fileLabel.setTextColor(textDark)
-            progressBox.visibility = View.GONE
+            rows = built
+            listTitle.text = "📋 ভিডিও তালিকা (${built.size} টি)"
+            listCard.visibility = View.VISIBLE
             showStatus("প্রস্তুত! এবার কনভার্ট করুন", textGray)
         }
         setButtons(false)
@@ -143,156 +226,118 @@ class MainActivity : AppCompatActivity() {
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(40), dp(24), dp(56))
+            setPadding(dp(20), dp(28), dp(20), dp(44))
             background = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR, intArrayOf(primary, accent)
             )
         }
         header.addView(TextView(this).apply {
             text = "📱 3GP কনভার্টার"
-            textSize = 26f
+            textSize = 22f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
         })
         header.addView(TextView(this).apply {
             text = "পুরোনো কিপ্যাড ফোনের জন্য ভিডিও রূপান্তর"
-            textSize = 14f
+            textSize = 13f
             setTextColor(Color.parseColor("#E0F2FE"))
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(4), 0, 0)
         })
         page.addView(header)
 
+        // ছোট মূল বক্স
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(20), dp(20), dp(20))
-            background = shape(Color.WHITE, 20)
+            setPadding(dp(16), dp(16), dp(16), dp(14))
+            background = shape(Color.WHITE, 18)
             elevation = dp(6).toFloat()
         }
-        val cardParams = LinearLayout.LayoutParams(
+        page.addView(card, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(dp(16), -dp(32), dp(16), dp(16)) }
+        ).apply { setMargins(dp(16), -dp(28), dp(16), dp(12)) })
 
         pickBtn = Button(this).apply {
-            text = "📂  ভিডিও বেছে নিন (একাধিক হতে পারে)"
+            text = "📂  ভিডিও বেছে নিন (একাধিক)"
             isAllCaps = false
             textSize = 15f
             setTextColor(primary)
-            background = shape(Color.WHITE, 14, primary)
+            background = shape(Color.WHITE, 12, primary)
             stateListAnimator = null
         }
         card.addView(pickBtn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
 
-        fileLabel = TextView(this).apply {
-            text = "কোনো ভিডিও বাছা হয়নি (MP4, MKV...)"
-            textSize = 14f
-            setTextColor(textGray)
-            setPadding(dp(4), dp(12), dp(4), dp(8))
-        }
-        card.addView(fileLabel)
-
-        card.addView(TextView(this).apply {
-            text = "কোয়ালিটি বেছে নিন"
-            textSize = 13f
-            setTextColor(textGray)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(4), dp(8), 0, dp(4))
-        })
-
-        sizeGroup = RadioGroup(this)
+        sizeGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         fun option(label: String, optId: Int, checked: Boolean) = RadioButton(this).apply {
             text = label
             id = optId
             isChecked = checked
-            textSize = 15f
+            textSize = 14f
             setTextColor(textDark)
             buttonTintList = ColorStateList.valueOf(primary)
-            setPadding(dp(6), dp(8), dp(6), dp(8))
         }
-        sizeGroup.addView(option("176×144 — দ্রুত, সাধারণ কিপ্যাড", 1, true))
-        sizeGroup.addView(option("352×288 — একটু ভালো, ধীর", 2, false))
-        card.addView(sizeGroup)
+        sizeGroup.addView(option("176×144 দ্রুত", 1, true),
+            RadioGroup.LayoutParams(0, RadioGroup.LayoutParams.WRAP_CONTENT, 1f))
+        sizeGroup.addView(option("352×288 ভালো", 2, false),
+            RadioGroup.LayoutParams(0, RadioGroup.LayoutParams.WRAP_CONTENT, 1f))
+        card.addView(sizeGroup, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
+        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         convertBtn = Button(this).apply {
-            text = "🚀  3GP-তে কনভার্ট করুন"
+            text = "🚀  কনভার্ট করুন"
             isAllCaps = false
-            textSize = 17f
+            textSize = 16f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             background = GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(primary, accent)
-            ).apply { cornerRadius = dp(14).toFloat() }
+            ).apply { cornerRadius = dp(12).toFloat() }
             stateListAnimator = null
         }
-        card.addView(convertBtn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(16) })
-
+        btnRow.addView(convertBtn, LinearLayout.LayoutParams(0, dp(48), 1f))
         cancelBtn = Button(this).apply {
-            text = "⛔  বাতিল করুন"
+            text = "⛔  বাতিল"
             isAllCaps = false
-            textSize = 16f
+            textSize = 15f
             setTextColor(red)
-            background = shape(Color.WHITE, 14, red)
+            background = shape(Color.WHITE, 12, red)
             stateListAnimator = null
             visibility = View.GONE
         }
-        card.addView(cancelBtn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(10) })
-
-        progressBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            visibility = View.GONE
-            setPadding(0, dp(20), 0, 0)
-        }
-        queueText = TextView(this).apply {
-            text = ""
-            textSize = 14f
-            setTextColor(textDark)
-            gravity = Gravity.CENTER
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        progressBox.addView(queueText)
-        percentText = TextView(this).apply {
-            text = "0.0%"
-            textSize = 32f
-            setTextColor(primary)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(8), 0, 0)
-        }
-        progressBox.addView(percentText)
-        progressBox.addView(TextView(this).apply {
-            text = "সম্পন্ন"
-            textSize = 13f
-            setTextColor(textGray)
-        })
-        bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 1000
-            progress = 0
-            progressTintList = ColorStateList.valueOf(accent)
-            progressBackgroundTintList = ColorStateList.valueOf(Color.parseColor("#E5E7EB"))
-        }
-        progressBox.addView(bar, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(10)).apply { topMargin = dp(12) })
-        timeText = TextView(this).apply {
-            text = "00:00:00 / 00:00:00"
-            textSize = 13f
-            setTextColor(primary)
-            setPadding(0, dp(8), 0, 0)
-        }
-        progressBox.addView(timeText)
-        card.addView(progressBox)
+        btnRow.addView(cancelBtn, LinearLayout.LayoutParams(0, dp(48), 0.7f).apply { leftMargin = dp(10) })
+        card.addView(btnRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
 
         status = TextView(this).apply {
             text = "শুরু করতে এক বা একাধিক ভিডিও বেছে নিন"
             textSize = 14f
             setTextColor(textGray)
             gravity = Gravity.CENTER
-            setPadding(dp(4), dp(14), dp(4), 0)
+            setPadding(dp(4), dp(10), dp(4), 0)
         }
         card.addView(status)
 
-        page.addView(card, cardParams)
+        // ভিডিও তালিকা
+        listCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(8))
+            background = shape(Color.WHITE, 18)
+            elevation = dp(3).toFloat()
+            visibility = View.GONE
+        }
+        listTitle = TextView(this).apply {
+            text = "📋 ভিডিও তালিকা"
+            textSize = 15f
+            setTextColor(textDark)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        listCard.addView(listTitle)
+        listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        listCard.addView(listBox)
+        page.addView(listCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(dp(16), 0, dp(16), dp(12)) })
 
         page.addView(TextView(this).apply {
             text = "ফাইল সেভ হবে: Download/3GP ফোল্ডারে"
@@ -316,8 +361,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         FFmpegKitConfig.enableStatisticsCallback { st ->
-            val t = st.time.toLong()
-            runOnUiThread { updateProgress(t, curTotal) }
+            val r = curRow
+            val total = curTotal
+            if (r != null && total > 0) {
+                val frac = (st.time.toDouble() / total).coerceIn(0.0, 1.0)
+                runOnUiThread {
+                    if (curRow === r) {
+                        setRow(r, (frac * 1000).toInt(), red, String.format(Locale.US, "%.1f%%", frac * 100))
+                    }
+                }
+            }
         }
 
         pickBtn.setOnClickListener { picker.launch("video/*") }
@@ -331,8 +384,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runQueue() {
-        val uris = videoUris
-        if (uris.isEmpty()) return
+        val list = rows
+        if (list.isEmpty()) return
         val big = sizeGroup.checkedRadioButtonId == 2
         val w = if (big) 352 else 176
         val h = if (big) 288 else 144
@@ -340,33 +393,30 @@ class MainActivity : AppCompatActivity() {
 
         cancelled = false
         setButtons(true)
-        progressBox.visibility = View.VISIBLE
+        list.forEach { setWaiting(it) }
         showStatus("", textGray)
 
         Thread {
             var ok = 0
             var fail = 0
-            for ((idx, uri) in uris.withIndex()) {
+            for ((idx, row) in list.withIndex()) {
                 if (cancelled) break
-                val name = fileName(uri)
-                runOnUiThread {
-                    queueText.text = "ভিডিও ${idx + 1}/${uris.size}: $name"
-                    updateProgress(0, 0)
-                    showStatus("ভিডিও কপি হচ্ছে... ⏳", textGray)
-                }
-                when (convertOne(uri, name, w, h, vb)) {
-                    0 -> ok++
-                    1 -> fail++
-                    else -> {}
+                runOnUiThread { showStatus("ভিডিও ${idx + 1}/${list.size} চলছে...", textDark) }
+                curRow = row
+                val res = convertOne(row, w, h, vb)
+                curRow = null
+                when (res) {
+                    0 -> { ok++; runOnUiThread { setRow(row, 1000, green, "সম্পন্ন ✓") } }
+                    1 -> { fail++; runOnUiThread { setRow(row, 1000, orange, "ব্যর্থ ✗") } }
+                    else -> runOnUiThread { setWaiting(row, "বাতিল") }
                 }
             }
             runOnUiThread {
                 setButtons(false)
-                progressBox.visibility = View.GONE
                 if (cancelled) {
-                    showStatus("⛔ বাতিল করা হয়েছে\n$ok টি আগেই সম্পন্ন হয়েছিল", red, 15f)
+                    showStatus("⛔ বাতিল করা হয়েছে ($ok টি সম্পন্ন হয়েছিল)", red, 14f)
                 } else if (fail == 0) {
-                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nDownload/3GP ফোল্ডারে সেভ হয়েছে", green, 16f)
+                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nDownload/3GP ফোল্ডারে সেভ হয়েছে", green, 15f)
                 } else {
                     showStatus("সম্পন্ন: $ok টি, ব্যর্থ: $fail টি ❌\n" + lastError.takeLast(500), red, 12f)
                 }
@@ -375,12 +425,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     // 0 = সফল, 1 = ব্যর্থ, 2 = বাতিল
-    private fun convertOne(uri: Uri, name: String, w: Int, h: Int, vb: String): Int {
+    private fun convertOne(row: Row, w: Int, h: Int, vb: String): Int {
         val stamp = System.currentTimeMillis()
         val tmpIn = File(cacheDir, "in_$stamp.mp4")
         val out = File(cacheDir, "out_$stamp.3gp")
         try {
-            contentResolver.openInputStream(uri)!!.use { input ->
+            runOnUiThread { setRow(row, 0, red, "কপি হচ্ছে…") }
+            contentResolver.openInputStream(row.uri)!!.use { input ->
                 tmpIn.outputStream().use { output ->
                     val buf = ByteArray(256 * 1024)
                     while (true) {
@@ -401,10 +452,7 @@ class MainActivity : AppCompatActivity() {
                 d
             } catch (_: Throwable) { 0L }
 
-            runOnUiThread {
-                showStatus("কনভার্ট হচ্ছে... অপেক্ষা করুন", textGray)
-                updateProgress(0, curTotal)
-            }
+            runOnUiThread { setRow(row, 0, red, "0.0%") }
 
             fun cmd(audio: String) =
                 "-y -i \"${tmpIn.absolutePath}\" " +
@@ -422,14 +470,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (!ReturnCode.isSuccess(s.returnCode)) {
-                lastError = "[$name]\n" + (s.output ?: "")
+                lastError = "[${row.name}]\n" + (s.output ?: "")
                 return 1
             }
 
-            runOnUiThread { updateProgress(curTotal, curTotal) }
-            return if (saveResult(out, baseName(name))) 0 else 1
+            return if (saveResult(out, baseName(row.name))) 0 else 1
         } catch (t: Throwable) {
-            lastError = "[$name]\n" + rootCause(t)
+            lastError = "[${row.name}]\n" + rootCause(t)
             return 1
         } finally {
             tmpIn.delete()

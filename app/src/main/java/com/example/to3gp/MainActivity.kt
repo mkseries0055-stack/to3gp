@@ -1,6 +1,8 @@
 package com.example.to3gp
 
-import android.content.ContentValues
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -8,10 +10,14 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.TextUtils
+import android.text.style.RelativeSizeSpan
 import android.util.Size
 import android.view.Gravity
 import android.view.View
@@ -53,9 +59,11 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var curTotal = 0L
     @Volatile private var curRow: Row? = null
     @Volatile private var lastError = ""
+    @Volatile private var saveTree: Uri? = null
 
     private lateinit var pickBtn: Button
     private lateinit var status: TextView
+    private lateinit var footer: TextView
     private lateinit var convertBtn: Button
     private lateinit var cancelBtn: Button
     private lateinit var sizeGroup: RadioGroup
@@ -90,6 +98,13 @@ class MainActivity : AppCompatActivity() {
         val n = name.substringBeforeLast('.', name)
         val clean = n.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(80)
         return if (clean.isEmpty()) "video" else clean
+    }
+
+    private fun folderLabel(uri: Uri): String {
+        return try {
+            val id = DocumentsContract.getTreeDocumentId(uri).substringAfter(':', "")
+            if (id.isEmpty()) "মূল ফোল্ডার" else id
+        } catch (_: Throwable) { "বেছে নেওয়া ফোল্ডার" }
     }
 
     private fun stopped(r: Row) = cancelled || r.skipped
@@ -227,6 +242,8 @@ class MainActivity : AppCompatActivity() {
         return Pair(line, row)
     }
 
+    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     private val picker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (!uris.isNullOrEmpty()) {
             listBox.removeAllViews()
@@ -242,6 +259,20 @@ class MainActivity : AppCompatActivity() {
             showStatus("প্রস্তুত! এবার কনভার্ট করুন\n(কোনোটা বাদ দিতে ডানের ❌ চাপুন)", textGray)
         }
         setButtons(false)
+    }
+
+    private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: Throwable) {}
+            saveTree = uri
+            footer.text = "সেভ হবে: " + folderLabel(uri)
+            runQueue()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -291,7 +322,9 @@ class MainActivity : AppCompatActivity() {
         ).apply { setMargins(dp(16), -dp(28), dp(16), dp(12)) })
 
         pickBtn = Button(this).apply {
-            text = "📂  ভিডিও বেছে নিন (একাধিক)"
+            val label = SpannableString("+\nselect")
+            label.setSpan(RelativeSizeSpan(2.6f), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            text = label
             isAllCaps = false
             textSize = 15f
             setTextColor(primary)
@@ -299,7 +332,7 @@ class MainActivity : AppCompatActivity() {
             stateListAnimator = null
         }
         card.addView(pickBtn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(92)))
 
         sizeGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         fun option(label: String, optId: Int, checked: Boolean) = RadioButton(this).apply {
@@ -344,7 +377,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
 
         status = TextView(this).apply {
-            text = "শুরু করতে এক বা একাধিক ভিডিও বেছে নিন"
+            text = "শুরু করতে + চেপে এক বা একাধিক ভিডিও বেছে নিন"
             textSize = 14f
             setTextColor(textGray)
             gravity = Gravity.CENTER
@@ -372,13 +405,14 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { setMargins(dp(16), 0, dp(16), dp(12)) })
 
-        page.addView(TextView(this).apply {
-            text = "ফাইল সেভ হবে: Download/3GP ফোল্ডারে"
+        footer = TextView(this).apply {
+            text = "কনভার্ট চাপলে সেভের ফোল্ডার বেছে নিতে বলা হবে"
             textSize = 12f
             setTextColor(textGray)
             gravity = Gravity.CENTER
             setPadding(dp(16), dp(4), dp(16), dp(24))
-        })
+        }
+        page.addView(footer)
 
         setContentView(ScrollView(this).apply {
             setBackgroundColor(bgColor)
@@ -407,16 +441,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         pickBtn.setOnClickListener { picker.launch("video/*") }
-        convertBtn.setOnClickListener { runQueue() }
+        convertBtn.setOnClickListener { folderPicker.launch(null) }
         cancelBtn.setOnClickListener {
             cancelled = true
             cancelBtn.isEnabled = false
             showStatus("বাতিল করা হচ্ছে...", red)
             try { FFmpegKit.cancel() } catch (_: Throwable) {}
         }
+
+        // প্রথমবার ফাইল অনুমতি চাওয়া
+        val perm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO
+                   else Manifest.permission.READ_EXTERNAL_STORAGE
+        val prefs = getSharedPreferences("app", MODE_PRIVATE)
+        if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED && !prefs.getBoolean("asked", false)) {
+            prefs.edit().putBoolean("asked", true).apply()
+            permLauncher.launch(perm)
+        }
     }    private fun runQueue() {
         val list = rows
-        if (list.isEmpty()) return
+        val tree = saveTree
+        if (list.isEmpty() || tree == null) return
         val big = sizeGroup.checkedRadioButtonId == 2
         val w = if (big) 352 else 176
         val h = if (big) 288 else 144
@@ -440,7 +484,7 @@ class MainActivity : AppCompatActivity() {
                 if (row.skipped) continue
                 runOnUiThread { showStatus("ভিডিও ${idx + 1}/${list.size} চলছে...", textDark) }
                 curRow = row
-                val res = convertOne(row, w, h, vb)
+                val res = convertOne(row, w, h, vb, tree)
                 curRow = null
                 when (res) {
                     0 -> {
@@ -474,7 +518,7 @@ class MainActivity : AppCompatActivity() {
                 if (cancelled) {
                     showStatus("⛔ বাতিল করা হয়েছে ($ok টি সম্পন্ন হয়েছিল)", red, 14f)
                 } else if (fail == 0) {
-                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nDownload/3GP ফোল্ডারে সেভ হয়েছে$skipNote", green, 15f)
+                    showStatus("✅ সব সম্পন্ন! ($ok টি)\nবেছে নেওয়া ফোল্ডারে সেভ হয়েছে$skipNote", green, 15f)
                 } else {
                     showStatus("সম্পন্ন: $ok টি, ব্যর্থ: $fail টি ❌$skipNote\n" + lastError.takeLast(500), red, 12f)
                 }
@@ -483,7 +527,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // 0 = সফল, 1 = ব্যর্থ, 2 = বাতিল বা বাদ
-    private fun convertOne(row: Row, w: Int, h: Int, vb: String): Int {
+    private fun convertOne(row: Row, w: Int, h: Int, vb: String, tree: Uri): Int {
         val stamp = System.currentTimeMillis()
         val tmpIn = File(cacheDir, "in_$stamp.mp4")
         val out = File(cacheDir, "out_$stamp.3gp")
@@ -532,7 +576,7 @@ class MainActivity : AppCompatActivity() {
                 return 1
             }
 
-            return if (saveResult(out, baseName(row.name))) 0 else 1
+            return if (saveResult(out, baseName(row.name), tree)) 0 else 1
         } catch (t: Throwable) {
             if (stopped(row)) return 2
             lastError = "[${row.name}]\n" + rootCause(t)
@@ -543,14 +587,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveResult(file: File, base: String): Boolean {
+    private fun saveResult(file: File, base: String, tree: Uri): Boolean {
         return try {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, "$base.3gp")
-                put(MediaStore.Downloads.MIME_TYPE, "video/3gpp")
-                put(MediaStore.Downloads.RELATIVE_PATH, "Download/3GP")
-            }
-            val dest = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            val parent = DocumentsContract.buildDocumentUriUsingTree(
+                tree, DocumentsContract.getTreeDocumentId(tree)
+            )
+            val dest = DocumentsContract.createDocument(contentResolver, parent, "video/3gpp", "$base.3gp")
                 ?: throw RuntimeException("ফাইল তৈরি করা যায়নি")
             contentResolver.openOutputStream(dest)!!.use { o ->
                 file.inputStream().use { it.copyTo(o) }
